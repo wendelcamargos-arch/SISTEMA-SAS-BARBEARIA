@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: barbearia
+          POSTGRES_PASSWORD: barbearia_ci
+          POSTGRES_DB: barbearia_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U barbearia"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s --health-timeout 3s --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://barbearia:barbearia_ci@localhost:5432/barbearia_test
+      REDIS_URL: redis://localhost:6379/0
+      META_WHATSAPP_VERIFY_TOKEN: token-ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalação limpa
+        run: pip install -r requirements.txt
+
+      - name: Extensão btree_gist
+        run: |
+          sudo apt-get install -y postgresql-client
+          PGPASSWORD=barbearia_ci psql -h localhost -U barbearia -d barbearia_test \
+            -c "CREATE EXTENSION IF NOT EXISTS btree_gist"
+
+      - name: Compileall
+        run: python -m compileall app
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Type checking (mypy)
+        run: mypy app
+
+      - name: Migrations em banco vazio
+        run: python -m alembic upgrade head
+
+      - name: Testes (PostgreSQL + Redis) com cobertura
+        run: pytest -q --cov=app --cov-report=term --cov-fail-under=85
+
+      - name: Auditoria de dependências
+        run: pip-audit -r requirements.txt
+
+      - name: Busca de segredos no diff
+        run: |
+          ! grep -rEn "(AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC )?PRIVATE KEY|xox[bp]-|ghp_[A-Za-z0-9]{36})" \
+            --include="*.py" --include="*.yml" --include="*.md" --include="*.js" \
+            --include="*.html" --include="*.example" .
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker
+        run: docker build -t sistema-sas-barbearia:ci .
+      - name: Compose config
+        run: BARBEARIA_SECRET=ci docker compose config -q

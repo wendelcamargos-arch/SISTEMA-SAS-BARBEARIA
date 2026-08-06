@@ -1,0 +1,113 @@
+"""Estoque com custo médio móvel.
+
+Metodologia (docs/DATABASE.md): a cada COMPRA o custo médio é recalculado:
+  novo_custo_medio = (qtd_atual*custo_medio + qtd_compra*custo_compra) / (qtd_atual + qtd_compra)
+Saídas (venda/consumo/perda) saem ao custo médio vigente, gravado no movimento.
+"""
+from decimal import ROUND_HALF_UP, Decimal
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from ..audit import auditar
+from ..auth import contexto_tenant, exigir_gerente
+from ..db import get_db, row, rows
+from ..money import D, QUATRO_CASAS, dinheiro
+from ..util import agora_tenant
+
+router = APIRouter(prefix="/api/estoque", tags=["estoque"])
+
+
+class ProdutoIn(BaseModel):
+    nome: str
+    custo: Decimal = Decimal("0")
+    preco_venda: Decimal = Decimal("0")
+    estoque_minimo: Decimal = Decimal("0")
+
+
+class MovimentoIn(BaseModel):
+    tipo: str          # compra | consumo | ajuste | perda
+    quantidade: Decimal
+    valor_unitario: Decimal = Decimal("0")
+    lancar_no_caixa: bool = True
+
+
+@router.get("")
+def listar(usuario: dict = Depends(contexto_tenant)):
+    with get_db() as db:
+        lista = rows(db.execute(
+            "SELECT * FROM produtos WHERE tenant_id=? AND ativo=1 ORDER BY nome", (usuario["tenant_id"],)))
+    for p in lista:
+        p["abaixo_minimo"] = p["quantidade"] <= p["estoque_minimo"]
+    return lista
+
+
+@router.post("")
+def criar(dados: ProdutoIn, usuario: dict = Depends(exigir_gerente)):
+    with get_db() as db:
+        pid = db.insert(
+            "INSERT INTO produtos (tenant_id, nome, custo, custo_medio, preco_venda, estoque_minimo) VALUES (?,?,?,?,?,?)",
+            (usuario["tenant_id"], dados.nome, dados.custo, dados.custo,
+             dados.preco_venda, dados.estoque_minimo))
+        return {"id": pid}
+
+
+@router.post("/{produto_id}/movimento")
+def movimentar(produto_id: int, dados: MovimentoIn, usuario: dict = Depends(contexto_tenant)):
+    if dados.tipo not in ("compra", "consumo", "ajuste", "perda"):
+        raise HTTPException(422, "Tipo deve ser compra, consumo, ajuste ou perda")
+    if dados.quantidade <= 0 and dados.tipo != "ajuste":
+        raise HTTPException(422, "Quantidade deve ser positiva")
+    with get_db() as db:
+        p = row(db.execute("SELECT * FROM produtos WHERE id=? AND tenant_id=? AND ativo=1",
+                           (produto_id, usuario["tenant_id"])))
+        if not p:
+            raise HTTPException(404, "Produto não encontrado")
+        delta = dados.quantidade if dados.tipo in ("compra", "ajuste") else -dados.quantidade
+        if D(p["quantidade"]) + delta < 0:
+            raise HTTPException(409, f"Estoque insuficiente de {p['nome']}")
+
+        agora = agora_tenant(db, usuario["tenant_id"])
+        custo_medio = D(p["custo_medio"] or p["custo"])
+        if dados.tipo == "compra":
+            custo_compra = D(dados.valor_unitario or p["custo"])
+            qtd_atual = D(p["quantidade"])
+            total_qtd = qtd_atual + dados.quantidade
+            custo_medio = ((qtd_atual * custo_medio + dados.quantidade * custo_compra)
+                           / total_qtd).quantize(QUATRO_CASAS, rounding=ROUND_HALF_UP) \
+                if total_qtd > 0 else custo_compra
+            db.execute("UPDATE produtos SET custo_medio=? WHERE id=?", (custo_medio, produto_id))
+
+        db.execute("UPDATE produtos SET quantidade = quantidade + ? WHERE id=?", (delta, produto_id))
+        db.execute(
+            """INSERT INTO movimentos_estoque (tenant_id, produto_id, tipo, quantidade, valor_unitario, custo_unitario, data)
+               VALUES (?,?,?,?,?,?,?)""",
+            (usuario["tenant_id"], produto_id, dados.tipo, delta,
+             dados.valor_unitario or custo_medio, custo_medio, agora.strftime("%Y-%m-%dT%H:%M")))
+
+        if dados.tipo == "compra" and dados.lancar_no_caixa:
+            custo_total = dinheiro(D(dados.valor_unitario or p["custo"]) * dados.quantidade)
+            if custo_total > 0:
+                db.execute(
+                    "INSERT INTO lancamentos_caixa (tenant_id, data, tipo, categoria, descricao, valor) VALUES (?,?,?,?,?,?)",
+                    (usuario["tenant_id"], agora.strftime("%Y-%m-%d"), "saida", "despesa_variavel",
+                     f"Compra estoque: {dados.quantidade:g}x {p['nome']}", custo_total))
+        if dados.tipo == "perda":
+            custo_total = dinheiro(custo_medio * dados.quantidade)
+            if custo_total > 0:
+                db.execute(
+                    "INSERT INTO lancamentos_caixa (tenant_id, data, tipo, categoria, descricao, valor) VALUES (?,?,?,?,?,?)",
+                    (usuario["tenant_id"], agora.strftime("%Y-%m-%d"), "saida", "cmv",
+                     f"Perda estoque: {dados.quantidade:g}x {p['nome']}", custo_total))
+            auditar(db, usuario["tenant_id"], usuario["uid"], "estoque_perda", "produto", produto_id,
+                    f"qtd={dados.quantidade:g}")
+    return {"mensagem": f"Movimento registrado ({delta:+g} {p['nome']})", "custo_medio": custo_medio}
+
+
+@router.get("/{produto_id}/movimentos")
+def movimentos(produto_id: int, usuario: dict = Depends(contexto_tenant)):
+    with get_db() as db:
+        return rows(db.execute(
+            """SELECT m.* FROM movimentos_estoque m JOIN produtos p ON p.id=m.produto_id
+               WHERE m.produto_id=? AND p.tenant_id=? ORDER BY m.data DESC, m.id DESC LIMIT 100""",
+            (produto_id, usuario["tenant_id"])))

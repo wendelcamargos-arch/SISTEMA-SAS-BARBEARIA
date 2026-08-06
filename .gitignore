@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+barbearia.db*
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+!.env.example
+.mypy_cache/
+.ruff_cache/

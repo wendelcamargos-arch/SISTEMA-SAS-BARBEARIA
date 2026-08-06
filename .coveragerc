@@ -1,0 +1,5 @@
+# Cobertura: app/seed.py é script de demonstração executado somente via
+# subprocess nos testes (tests/test_auth.py valida os bloqueios de produção),
+# portanto fica fora da medição em processo.
+[run]
+omit = app/seed.py
