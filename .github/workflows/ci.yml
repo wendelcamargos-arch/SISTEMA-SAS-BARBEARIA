@@ -30,7 +30,11 @@ jobs:
     env:
       DATABASE_URL: postgresql://barbearia:barbearia_ci@localhost:5432/barbearia_test
       REDIS_URL: redis://localhost:6379/0
-      META_WHATSAPP_VERIFY_TOKEN: token-ci
+      # META_WHATSAPP_VERIFY_TOKEN nao e definido aqui de proposito.
+      # tests/conftest.py declara o valor da suite via os.environ.setdefault,
+      # que so age se a variavel ainda nao existir. Defini-la no job criava
+      # uma segunda fonte de verdade: a aplicacao passava a esperar um token
+      # e o teste enviava outro, e o webhook respondia 403.
 
     steps:
       - uses: actions/checkout@v4
