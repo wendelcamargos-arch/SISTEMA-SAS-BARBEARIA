@@ -1,0 +1,34 @@
+# Contrato de lint do SISTEMA SAS BARBEARIA.
+#
+# Por que este arquivo existe:
+# o CI roda `ruff check .` e o requirements.txt pina apenas `ruff>=0.6`.
+# Sem configuração, o conjunto de regras efetivo passa a ser "o padrão da
+# versão do ruff que o CI baixar naquele dia" — um gate que muda sozinho a
+# cada release. Foi exatamente isso que deixou o CI vermelho: o ruff 0.16.2
+# trouxe um padrão mais amplo, acusou 114 achados e abortou o job antes de
+# mypy, migrations, testes, auditoria de dependências e busca de segredos
+# chegarem a rodar.
+#
+# Declarar o conjunto explicitamente torna o gate estável entre versões.
+
+target-version = "py311"
+
+[lint]
+# Conjunto padrão histórico do ruff: erros de sintaxe/pyflakes e um
+# subconjunto do pycodestyle. O código passa limpo neste conjunto hoje.
+select = ["E4", "E7", "E9", "F"]
+
+[lint.flake8-bugbear]
+# `Depends()`, `Query()` e afins em argumento padrão são o idioma do FastAPI,
+# não o bug que a B008 descreve. Declarado aqui para que a regra não volte a
+# gerar ruído caso o conjunto acima seja ampliado no futuro.
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.Query",
+  "fastapi.Header",
+  "fastapi.Path",
+  "fastapi.Body",
+  "fastapi.Form",
+  "fastapi.File",
+  "fastapi.Security",
+]
